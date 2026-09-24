@@ -54,6 +54,15 @@ HEADER_PREFIXES = ("جمهور", "حمه", "جمهر", "مصر", "مص", "عرب
 ARABIC_DIACRITICS_RE = re.compile(r"[\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06ed]")
 
 
+
+
+@dataclass(frozen=True)
+class OcrRegion:
+    name: str
+    box: tuple[float, float, float, float]
+    scale: int = 2
+    contrast: float = 2.0
+
 @dataclass(frozen=True)
 class ExtractedFields:
     name: str | None
@@ -146,18 +155,25 @@ def extract_name_from_text(text: str) -> str | None:
     return normalize_arabic_name(candidates[0]) if candidates else None
 
 
-def make_id_region_images(image_path: Path) -> list[Path]:
-    paths: list[Path] = []
+ID_REGIONS = (
+    OcrRegion("national_id", (0.42, 0.62, 0.98, 0.82), 2, 2.0),
+    OcrRegion("national_id", (0.00, 0.60, 1.00, 0.84), 2, 2.0),
+)
+NAME_REGIONS = (
+    OcrRegion("name", (0.38, 0.24, 0.98, 0.50), 2, 1.8),
+)
+ADDRESS_REGIONS = (
+    OcrRegion("address", (0.36, 0.40, 0.98, 0.64), 2, 1.8),
+)
+
+
+def make_region_images(image_path: Path, regions: tuple[OcrRegion, ...]) -> list[tuple[str, Path]]:
+    paths: list[tuple[str, Path]] = []
     with Image.open(image_path) as image:
         image = ImageOps.exif_transpose(image).convert("RGB")
         width, height = image.size
-        boxes = (
-            (0.42, 0.62, 0.98, 0.82),
-            (0.35, 0.58, 0.98, 0.84),
-            (0.00, 0.60, 1.00, 0.84),
-            (0.00, 0.66, 1.00, 0.88),
-        )
-        for box_index, (left, top, right, bottom) in enumerate(boxes):
+        for region_index, region in enumerate(regions):
+            left, top, right, bottom = region.box
             crop = image.crop(
                 (
                     int(width * left),
@@ -166,19 +182,18 @@ def make_id_region_images(image_path: Path) -> list[Path]:
                     int(height * bottom),
                 )
             )
-            crop = crop.resize((crop.width * 2, crop.height * 2))
+            crop = crop.resize((crop.width * region.scale, crop.height * region.scale))
             grayscale = ImageOps.grayscale(crop)
             variants = (
-                ImageEnhance.Contrast(grayscale).enhance(2.0).filter(ImageFilter.SHARPEN),
-                ImageOps.autocontrast(grayscale).filter(ImageFilter.SHARPEN),
+                ImageEnhance.Contrast(grayscale).enhance(region.contrast).filter(ImageFilter.SHARPEN),
             )
             for variant_index, variant in enumerate(variants):
                 with tempfile.NamedTemporaryFile(
                     delete=False,
-                    suffix=f"-id-{box_index}-{variant_index}.png",
+                    suffix=f"-{region.name}-{region_index}-{variant_index}.png",
                 ) as tmp:
                     variant.save(tmp, format="PNG")
-                    paths.append(Path(tmp.name))
+                    paths.append((region.name, Path(tmp.name)))
     return paths
 
 
@@ -189,27 +204,43 @@ class PaddleOcrExtractor:
         self._pipeline = None
 
     def extract(self, image_path: Path) -> ExtractedFields:
-        text = self._run_paddleocr(image_path)
-        national_id = extract_national_id(text)
-        id_region_paths: list[Path] = []
+        full_text = self._run_paddleocr(image_path)
+        region_texts: dict[str, list[str]] = {"name": [], "address": [], "national_id": []}
+        region_paths: list[tuple[str, Path]] = []
         try:
-            if national_id is None:
-                id_region_paths = make_id_region_images(image_path)
-                for id_region_path in id_region_paths:
-                    id_region_text = self._run_paddleocr(id_region_path)
-                    if id_region_text:
-                        text = f"{text}\n{id_region_text}"
-                        national_id = extract_national_id(text)
-                        if national_id is not None:
-                            break
+            region_paths = make_region_images(
+                image_path,
+                NAME_REGIONS + ADDRESS_REGIONS + ID_REGIONS,
+            )
+            for region_name, region_path in region_paths:
+                region_text = self._run_paddleocr(region_path)
+                if region_text:
+                    region_texts.setdefault(region_name, []).append(region_text)
         finally:
-            for id_region_path in id_region_paths:
-                id_region_path.unlink(missing_ok=True)
+            for _, region_path in region_paths:
+                region_path.unlink(missing_ok=True)
+
+        name_text = "\n".join(region_texts["name"])
+        id_text = "\n".join(region_texts["national_id"])
+        combined_text = "\n".join(
+            part
+            for part in (
+                "[name regions]",
+                name_text,
+                "[address regions]",
+                "\n".join(region_texts["address"]),
+                "[national id regions]",
+                id_text,
+                "[full card]",
+                full_text,
+            )
+            if part
+        )
 
         return ExtractedFields(
-            name=extract_name_from_text(text),
-            national_id=national_id,
-            ocr_text=text,
+            name=extract_name_from_text(name_text) or extract_name_from_text(full_text),
+            national_id=extract_national_id(id_text) or extract_national_id(combined_text),
+            ocr_text=combined_text,
         )
 
     def _run_paddleocr(self, image_path: Path) -> str:
