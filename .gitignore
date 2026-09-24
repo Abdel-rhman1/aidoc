@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local app/runtime files
+logs/
+*.log
+*.tmp
+*.temp
+.env
+.env.*
+!.env.example
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OCR/model caches and generated outputs
+.paddlex/
+*.onnx
+*.pdmodel
+*.pdiparams
+*.safetensors
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
