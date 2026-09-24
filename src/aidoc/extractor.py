@@ -146,26 +146,40 @@ def extract_name_from_text(text: str) -> str | None:
     return normalize_arabic_name(candidates[0]) if candidates else None
 
 
-def make_id_region_image(image_path: Path) -> Path:
+def make_id_region_images(image_path: Path) -> list[Path]:
+    paths: list[Path] = []
     with Image.open(image_path) as image:
         image = ImageOps.exif_transpose(image).convert("RGB")
         width, height = image.size
-        crop = image.crop(
-            (
-                int(width * 0.42),
-                int(height * 0.62),
-                int(width * 0.98),
-                int(height * 0.82),
-            )
+        boxes = (
+            (0.42, 0.62, 0.98, 0.82),
+            (0.35, 0.58, 0.98, 0.84),
+            (0.00, 0.60, 1.00, 0.84),
+            (0.00, 0.66, 1.00, 0.88),
         )
-        crop = crop.resize((crop.width * 2, crop.height * 2))
-        crop = ImageOps.grayscale(crop)
-        crop = ImageEnhance.Contrast(crop).enhance(2.0)
-        crop = crop.filter(ImageFilter.SHARPEN)
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-            crop.save(tmp, format="PNG")
-            return Path(tmp.name)
+        for box_index, (left, top, right, bottom) in enumerate(boxes):
+            crop = image.crop(
+                (
+                    int(width * left),
+                    int(height * top),
+                    int(width * right),
+                    int(height * bottom),
+                )
+            )
+            crop = crop.resize((crop.width * 2, crop.height * 2))
+            grayscale = ImageOps.grayscale(crop)
+            variants = (
+                ImageEnhance.Contrast(grayscale).enhance(2.0).filter(ImageFilter.SHARPEN),
+                ImageOps.autocontrast(grayscale).filter(ImageFilter.SHARPEN),
+            )
+            for variant_index, variant in enumerate(variants):
+                with tempfile.NamedTemporaryFile(
+                    delete=False,
+                    suffix=f"-id-{box_index}-{variant_index}.png",
+                ) as tmp:
+                    variant.save(tmp, format="PNG")
+                    paths.append(Path(tmp.name))
+    return paths
 
 
 class PaddleOcrExtractor:
@@ -176,19 +190,25 @@ class PaddleOcrExtractor:
 
     def extract(self, image_path: Path) -> ExtractedFields:
         text = self._run_paddleocr(image_path)
-        id_region_path: Path | None = None
+        national_id = extract_national_id(text)
+        id_region_paths: list[Path] = []
         try:
-            id_region_path = make_id_region_image(image_path)
-            id_region_text = self._run_paddleocr(id_region_path)
-            if id_region_text:
-                text = f"{text}\n{id_region_text}"
+            if national_id is None:
+                id_region_paths = make_id_region_images(image_path)
+                for id_region_path in id_region_paths:
+                    id_region_text = self._run_paddleocr(id_region_path)
+                    if id_region_text:
+                        text = f"{text}\n{id_region_text}"
+                        national_id = extract_national_id(text)
+                        if national_id is not None:
+                            break
         finally:
-            if id_region_path is not None:
+            for id_region_path in id_region_paths:
                 id_region_path.unlink(missing_ok=True)
 
         return ExtractedFields(
             name=extract_name_from_text(text),
-            national_id=extract_national_id(text),
+            national_id=national_id,
             ocr_text=text,
         )
 

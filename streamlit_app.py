@@ -23,7 +23,7 @@ if uploaded:
         with st.spinner("Reading document..."):
             files = {"file": (uploaded.name, uploaded.getvalue(), uploaded.type)}
             try:
-                response = requests.post(API_URL, files=files, timeout=120)
+                response = requests.post(API_URL, files=files, timeout=600)
                 response.raise_for_status()
                 data = response.json()
             except requests.RequestException as exc:
