@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -19,6 +20,7 @@ ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Egyptian National ID OCR", version="0.1.0")
 OCR_ENGINE = os.getenv("AIDOC_OCR_ENGINE", "classic").lower()
@@ -40,7 +42,7 @@ class VerificationResponse(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "ocr_engine": OCR_ENGINE}
 
 
 async def save_upload(file: UploadFile) -> Path:
@@ -99,7 +101,11 @@ async def verify(file: UploadFile = File(...)) -> VerificationResponse:
             confidence=fields.confidence,
         )
     except RuntimeError as exc:
+        logger.exception("OCR runtime error")
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Unexpected OCR error")
+        raise HTTPException(status_code=500, detail=f"Unexpected OCR error: {exc}") from exc
     finally:
         upload_path.unlink(missing_ok=True)
         if ocr_path is not None:
