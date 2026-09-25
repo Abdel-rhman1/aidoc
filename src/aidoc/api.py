@@ -9,8 +9,8 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel
 
-from .egypt_id import EgyptIdValidation, validate_egyptian_national_id
-from .extractor import PaddleOcrExtractor, PaddleOcrVlExtractor
+from .egypt_id import EgyptIdValidation, extract_valid_national_id, validate_egyptian_national_id
+from .extractor import HybridExtractor, PaddleOcrExtractor, PaddleOcrVlExtractor, QwenOpenVinoExtractor
 
 
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
@@ -24,11 +24,32 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Egyptian National ID OCR", version="0.1.0")
 OCR_ENGINE = os.getenv("AIDOC_OCR_ENGINE", "classic").lower()
-extractor = (
-    PaddleOcrVlExtractor(pipeline_version="v1.6")
-    if OCR_ENGINE == "vl"
-    else PaddleOcrExtractor(lang=os.getenv("AIDOC_OCR_LANG", "ar"))
-)
+if OCR_ENGINE == "vl":
+    extractor = PaddleOcrVlExtractor(pipeline_version="v1.6")
+elif OCR_ENGINE in {"qwen", "qwen-vl", "openvino", "hybrid", "classic-qwen", "qwen-fallback"}:
+    extractor = QwenOpenVinoExtractor(
+        model_path=os.getenv(
+            "QWEN_VL_MODEL_PATH",
+            "models/Qwen3-VL-4B-Instruct-int4-ov",
+        ),
+        device=os.getenv("QWEN_VL_DEVICE", "CPU"),
+        max_new_tokens=int(os.getenv("QWEN_VL_MAX_NEW_TOKENS", "300")),
+    )
+elif OCR_ENGINE in {"hybrid", "classic-qwen", "qwen-fallback"}:
+    extractor = HybridExtractor(
+        classic=PaddleOcrExtractor(lang=os.getenv("AIDOC_OCR_LANG", "ar")),
+        qwen=QwenOpenVinoExtractor(
+            model_path=os.getenv(
+                "QWEN_VL_MODEL_PATH",
+                "models/Qwen3-VL-4B-Instruct-int4-ov",
+            ),
+            device=os.getenv("QWEN_VL_DEVICE", "CPU"),
+            max_new_tokens=int(os.getenv("QWEN_VL_MAX_NEW_TOKENS", "300")),
+        ),
+        always_run_qwen=os.getenv("HYBRID_ALWAYS_QWEN", "0") == "1",
+    )
+else:
+    extractor = PaddleOcrExtractor(lang=os.getenv("AIDOC_OCR_LANG", "ar"))
 
 
 class VerificationResponse(BaseModel):
@@ -42,7 +63,7 @@ class VerificationResponse(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "ocr_engine": OCR_ENGINE}
+    return {"status": "ok", "ocr_engine": OCR_ENGINE, "qwen_model_path": os.getenv("QWEN_VL_MODEL_PATH", "") if OCR_ENGINE in {"qwen", "qwen-vl", "openvino", "hybrid", "classic-qwen", "qwen-fallback"} else ""}
 
 
 async def save_upload(file: UploadFile) -> Path:
@@ -91,11 +112,14 @@ async def verify(file: UploadFile = File(...)) -> VerificationResponse:
     try:
         ocr_path = prepare_image_for_ocr(upload_path)
         fields = extractor.extract(ocr_path)
-        validation = validate_egyptian_national_id(fields.national_id)
+        national_id = extract_valid_national_id(
+            "\n".join(part for part in (fields.national_id, fields.ocr_text) if part)
+        )
+        validation = validate_egyptian_national_id(national_id)
         return VerificationResponse(
             valid=validation.valid and bool(fields.name),
             name=fields.name,
-            national_id=fields.national_id,
+            national_id=national_id,
             validation=validation,
             ocr_text=fields.ocr_text,
             confidence=fields.confidence,

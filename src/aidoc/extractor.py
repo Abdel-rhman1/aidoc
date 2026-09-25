@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import json
 import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
-from .egypt_id import extract_national_id
+from .egypt_id import extract_national_id, extract_valid_national_id
 
 
 ARABIC_LINE_RE = re.compile(r"[\u0600-\u06ff]{2,}(?:\s+[\u0600-\u06ff]{2,})+")
@@ -262,6 +264,165 @@ class PaddleOcrExtractor:
 
         results = self._pipeline.predict(str(image_path))
         return flatten_paddleocr_results(results)
+
+
+QWEN_ID_PROMPT = """
+You are reading the front side of an Egyptian national ID card.
+Return JSON only, without Markdown:
+{
+  "name": string or null,
+  "national_id_candidates": [strings],
+  "address": string or null
+}
+Rules:
+- Egyptian national_id must be exactly 14 digits.
+- The national ID is usually printed as Arabic or English digits near the lower front side of the card.
+- Include every possible 14-digit candidate you can see in national_id_candidates.
+- Do not return passport, serial, watermark, phone model, or short code values like KW4749408 as national_id candidates.
+- If the 14-digit Egyptian national ID is not visible, return an empty candidates array.
+- Preserve Arabic names and addresses as written.
+- Do not explain.
+""".strip()
+
+
+def json_block_from_text(text: str) -> dict[str, object]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
+        cleaned = re.sub(r"```$", "", cleaned).strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        cleaned = cleaned[start : end + 1]
+    try:
+        value = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+class QwenOpenVinoExtractor:
+    def __init__(self, model_path: str, device: str = "CPU", max_new_tokens: int = 300) -> None:
+        self.model_path = model_path
+        self.device = device
+        self.max_new_tokens = max_new_tokens
+        self._pipeline = None
+
+    def extract(self, image_path: Path) -> ExtractedFields:
+        text = self._run_qwen(image_path)
+        data = json_block_from_text(text)
+        candidates = data.get("national_id_candidates")
+        if isinstance(candidates, list):
+            candidate_text = "\n".join(str(candidate) for candidate in candidates)
+        else:
+            candidate_text = ""
+
+        name = data.get("name")
+        if not isinstance(name, str) or not name.strip():
+            name = extract_name_from_text(text)
+
+        address = data.get("address")
+        ocr_text = "\n".join(
+            part
+            for part in (
+                "[qwen json]",
+                json.dumps(data, ensure_ascii=False) if data else "",
+                "[qwen raw]",
+                text,
+                "[qwen address]",
+                address if isinstance(address, str) else "",
+            )
+            if part
+        )
+        return ExtractedFields(
+            name=normalize_arabic_name(name.strip()) if isinstance(name, str) else None,
+            national_id=extract_national_id(candidate_text or text),
+            ocr_text=ocr_text,
+        )
+
+    def _run_qwen(self, image_path: Path) -> str:
+        try:
+            import openvino as ov
+            import openvino_genai as ov_genai
+        except ImportError as exc:
+            raise RuntimeError(
+                "Qwen OpenVINO runtime is not installed. Install openvino, openvino-genai, "
+                "openvino-tokenizers, pillow, and numpy in the runtime environment."
+            ) from exc
+
+        if self._pipeline is None:
+            if not Path(self.model_path).exists():
+                raise RuntimeError(f"Qwen OpenVINO model path does not exist: {self.model_path}")
+            self._pipeline = ov_genai.VLMPipeline(self.model_path, self.device)
+
+        with Image.open(image_path) as image:
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            image_data = np.array(image).reshape(1, image.height, image.width, 3).astype(np.uint8)
+
+        result = self._pipeline.generate(
+            QWEN_ID_PROMPT,
+            images=[ov.Tensor(image_data)],
+            max_new_tokens=self.max_new_tokens,
+        )
+        return getattr(result, "text", str(result))
+
+
+class HybridExtractor:
+    def __init__(
+        self,
+        classic: PaddleOcrExtractor,
+        qwen: QwenOpenVinoExtractor,
+        always_run_qwen: bool = False,
+    ) -> None:
+        self.classic = classic
+        self.qwen = qwen
+        self.always_run_qwen = always_run_qwen
+
+    def extract(self, image_path: Path) -> ExtractedFields:
+        classic_fields = self.classic.extract(image_path)
+        classic_valid_id = extract_valid_national_id(
+            "\n".join(
+                part for part in (classic_fields.national_id, classic_fields.ocr_text) if part
+            )
+        )
+        should_run_qwen = self.always_run_qwen or classic_valid_id is None or not classic_fields.name
+
+        if not should_run_qwen:
+            return ExtractedFields(
+                name=classic_fields.name,
+                national_id=classic_valid_id,
+                ocr_text="\n".join(("[classic]", classic_fields.ocr_text)),
+                confidence=classic_fields.confidence,
+            )
+
+        qwen_fields = self.qwen.extract(image_path)
+        combined_text = "\n".join(
+            part
+            for part in (
+                "[classic]",
+                classic_fields.ocr_text,
+                "[qwen]",
+                qwen_fields.ocr_text,
+            )
+            if part
+        )
+        best_id = extract_valid_national_id(
+            "\n".join(
+                part
+                for part in (
+                    qwen_fields.national_id,
+                    classic_valid_id,
+                    combined_text,
+                )
+                if part
+            )
+        )
+        return ExtractedFields(
+            name=qwen_fields.name or classic_fields.name,
+            national_id=best_id,
+            ocr_text=combined_text,
+            confidence=qwen_fields.confidence or classic_fields.confidence,
+        )
 
 
 class PaddleOcrVlExtractor:

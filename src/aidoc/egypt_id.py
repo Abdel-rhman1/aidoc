@@ -51,7 +51,7 @@ def normalize_digits(value: str) -> str:
     return value.translate(translation)
 
 
-def extract_national_id(text: str) -> str | None:
+def national_id_candidates(text: str) -> list[str]:
     normalized = normalize_digits(text)
     compact_candidates = re.findall(r"(?<!\d)[23]\d{13}(?!\d)", normalized)
 
@@ -71,12 +71,20 @@ def extract_national_id(text: str) -> str | None:
                 if len(candidate) == 13 and candidate.startswith("285"):
                     chunk_candidates.append(candidate[:3] + "0" + candidate[3:])
 
-    candidates = compact_candidates + spaced_candidates + chunk_candidates
-    for candidate in candidates:
+    return list(dict.fromkeys(compact_candidates + spaced_candidates + chunk_candidates))
+
+
+def extract_valid_national_id(text: str) -> str | None:
+    for candidate in national_id_candidates(text):
         if validate_egyptian_national_id(candidate).valid:
             return candidate
+    return None
 
-    return candidates[0] if candidates else None
+
+def extract_national_id(text: str) -> str | None:
+    candidates = national_id_candidates(text)
+    valid_candidate = extract_valid_national_id(text)
+    return valid_candidate or (candidates[0] if candidates else None)
 
 
 def validate_egyptian_national_id(national_id: str | None) -> EgyptIdValidation:

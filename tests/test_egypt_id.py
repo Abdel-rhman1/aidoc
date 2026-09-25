@@ -1,4 +1,4 @@
-from aidoc.egypt_id import extract_national_id, validate_egyptian_national_id
+from aidoc.egypt_id import extract_national_id, extract_valid_national_id, validate_egyptian_national_id
 
 
 def test_extracts_arabic_digits_id() -> None:
@@ -26,3 +26,13 @@ def test_extracts_spaced_arabic_digits_id() -> None:
 
 def test_extracts_id_from_reversed_ocr_chunks() -> None:
     assert extract_national_id("٦٠٦١٢٠٠٤٧٥\n٢٨٥") == "28506061200475"
+
+
+def test_rejects_qwen_serial_as_national_id() -> None:
+    assert extract_valid_national_id("KW4749408") is None
+
+
+def test_prefers_valid_national_id_over_serial_code() -> None:
+    text = "national_id: KW4749408\n٢٨٠٠٩٢٧٠٢٠٢٩٣٧"
+
+    assert extract_valid_national_id(text) == "28009270202937"

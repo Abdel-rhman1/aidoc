@@ -61,6 +61,28 @@ By default the API uses the lighter Arabic PaddleOCR engine so it can run on low
 AIDOC_OCR_ENGINE=vl uvicorn src.aidoc.api:app --host 0.0.0.0 --port 8000
 ```
 
+To test a Qwen OpenVINO VLM on the server, install OpenVINO dependencies in that runtime and point the API at the downloaded model directory:
+
+```bash
+AIDOC_OCR_ENGINE=qwen \
+QWEN_VL_MODEL_PATH=/root/models/Qwen3-VL-4B-Instruct-int4-ov \
+QWEN_VL_DEVICE=CPU \
+uvicorn src.aidoc.api:app --host 0.0.0.0 --port 8000
+```
+
+The API still validates the national ID structurally, so VLM serial/code outputs such as `KW4749408` are rejected.
+
+Hybrid mode runs the lighter classic OCR first, then falls back to Qwen if the classic result is missing a valid ID or name:
+
+```bash
+AIDOC_OCR_ENGINE=hybrid \
+QWEN_VL_MODEL_PATH=/root/models/Qwen3-VL-4B-Instruct-int4-ov \
+QWEN_VL_DEVICE=CPU \
+uvicorn src.aidoc.api:app --host 0.0.0.0 --port 8000
+```
+
+Set `HYBRID_ALWAYS_QWEN=1` to always run both engines for comparison.
+
 UI:
 
 ```bash
